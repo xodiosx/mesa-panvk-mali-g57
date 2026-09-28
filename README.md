@@ -61,6 +61,7 @@ Experimental Mesa PanVK Vulkan driver for **ARM Mali-G57 MC2 / Valhall** using t
   * **Direct3D 9 (`wined3d`):** **37.60 – 46.91 FPS** sustained (`FPS: 37.6 | Frame: 482`), verified hardware depth buffer (`D3DFMT_D16`) and Euler rotation.
   * **Direct3D 10 (`d3d10.dll` / DXGI):** **26.10 – 28.85 FPS** sustained (`FPS: 26.1 | Cut Corner | Frame: 163`), verified runtime HLSL 4.0 compilation and dynamic lighting with zero driver hangs.
   * *See [Direct3D 9 & 10 Playtest Report](docs/panvk_g57/DIRECTX_TEST_REPORT.md).*
+  * *Related curiosity: [BCn texture notes](docs/panvk_g57/BCN_SUPPORT_NOTES.md) — this unit appears to decode BC1–BC3 natively (firmware bits + round-trip tests), BC4–7 cleanly refused; note the `textureCompressionBC` feature bit is hardcoded on in this tree, so trust per-format queries instead.*
 
 <p align="center">
   <img src="docs/panvk_g57/images/directx9_live_panvk.png" alt="Direct3D 9 via Wine and PanVK on Mali-G57 MC2" width="600" />
@@ -93,6 +94,13 @@ Experimental Mesa PanVK Vulkan driver for **ARM Mali-G57 MC2 / Valhall** using t
 5. **Mesa Zink Support (`nullDescriptor` & `EXT_robustness2`) (`panvk_vX_physical_device.c`):**
    * Lowered extension and feature exposure checks from `PAN_ARCH >= 10` to `PAN_ARCH >= 9`.
    * Mali-G57 (Valhall v9) now advertises `VK_EXT_robustness2` and the `nullDescriptor` feature, unblocking Mesa Zink from rejecting the device and allowing desktop OpenGL 3.2+ and Direct3D translation layers to initialize.
+6. **Batch Merging (`panvk_vX_gpu_queue_kbase.c`) *(Update)*:**
+   * Collapses the old one-submit-plus-CPU-wait-per-batch pattern into a single job bag per submit, cutting ~160 kernel round trips per frame.
+   * Opt-in via `PANVK_MERGE_SUBMIT=1` (always on when async is enabled).
+7. **True Async Submission (`panvk_kbase_async.c`, new file) *(Update)*:**
+   * Submit hands the job bag to the kernel and returns immediately instead of blocking until the GPU idles; completion is reaped lazily by polling the kbase event fd, with fences/semaphores resolved through `kbase_cpu_sync` armed with bag sequence numbers.
+   * One bag in flight per device (per-device serialization preserves kernel execution order); opt-in via `PANVK_ASYNC=1`.
+   * Lifts vkmark from ~77 (sync) / ~84 (merge only) to **94** full-suite with zero errors.
 
 ---
 
@@ -149,6 +157,29 @@ DISPLAY=:0 vkmark
 * `[clear] <default>`: **~119 FPS**
 * `[cube]  <default>`: **~88 FPS**
 
+### Async submission build (`v1.0.0-async`, vkmark 94) *(Update)*
+
+A second prebuilt flavor adds batch merging + true async submission (opt-in via `PANVK_ASYNC=1`):
+
+```bash
+curl -LO https://github.com/apexspan-svg/mesa-panvk-mali-g57/releases/download/v1.0.0-async/panvk-mali-g57-v1.0.0-async.tar.gz
+tar -xzvf panvk-mali-g57-v1.0.0-async.tar.gz
+cd panvk-mali-g57-v1.0.0-async
+./install.sh
+```
+
+Run with async enabled:
+
+```bash
+export DISPLAY=:0
+export VK_ICD_FILENAMES=$PREFIX/share/vulkan/icd.d/panfrost_icd.aarch64.json
+export PANVK_NO_AFBC=1
+export PANVK_ASYNC=1
+vkmark --winsys xcb -s 640x480
+```
+
+**Expected Performance on Mali-G57 MC2:** full-suite **~94** (97 on re-run), zero errors — vs ~81 for the default build on the same device state. Full source: branch [`g57-vkmark-94`](https://github.com/apexspan-svg/mesa-panvk-mali-g57/tree/g57-vkmark-94) (rebuilding it reproduces the release binary byte-for-byte, md5 `d883a28e…`).
+
 ---
 
 ## Building from Source (Developers)
@@ -194,10 +225,10 @@ ninja -C build-bionic src/panfrost/vulkan/libvulkan_panfrost.so
 
 ## Standalone Tests
 
-Test programs and shaders are provided in `tests/panvk-g57/`:
+Test programs and shaders are provided in `tests/panvk-g57-async/`:
 
 ```bash
-cd tests/panvk-g57
+cd tests/panvk-g57-async
 
 # Test direct kbase kernel ioctls
 clang test_gpu_id.c -o test_gpu_id
