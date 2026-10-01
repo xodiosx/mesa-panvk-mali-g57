@@ -1,5 +1,8 @@
 # Mesa PanVK Mali-G57 — kbase JM / Android
 
+> [!IMPORTANT]
+> **Latest marks *(Update)* — [`v1.2.0` release](https://github.com/apexspan-svg/mesa-panvk-mali-g57/releases/tag/v1.2.0):** vkmark 640x480 immediate **248** · glmark2/Zink (mailbox) **132** · WebGL aquarium 500 fish **51.5 fps** — Mali-G57 MC2, all runs exit `0`. Prebuilt balls + md5sums on the [release page](https://github.com/apexspan-svg/mesa-panvk-mali-g57/releases/tag/v1.2.0); full source: branch [`main`](https://github.com/apexspan-svg/mesa-panvk-mali-g57/tree/main).
+
 Experimental Mesa PanVK Vulkan driver for **ARM Mali-G57 MC2 / Valhall** using the Arm **kbase JM (Job Manager)** interface on Android / Termux.
 
 > [!NOTE]
@@ -30,7 +33,7 @@ Experimental Mesa PanVK Vulkan driver for **ARM Mali-G57 MC2 / Valhall** using t
     * **Broad Sample Compatibility:** Verified loading and running almost all official test demos from [webglsamples.org](https://webglsamples.org/) on MediaTek Dimensity 6300 (Mali-G57 MC2) (dynamic lighting, shaders, textures, reflections, and particle systems).
     * **WebGL Aquarium (500 Fishes at 1024x1024 Canvas):**
       * **PanVK:** **15–25 FPS** (peak ~26 FPS, real-time interactive rendering)
-      * **VirGL (`virpipe`):** **~3 FPS** (flat-lined hard bottleneck due to socket IPC serialization)
+      * **VirGL (`virpipe`):** **~3 FPS** typically (socket IPC serialization bottleneck) — but highly unstable: observed bursting to ~23 FPS for seconds, matching PanVK momentarily, then collapsing. Short VirGL samples mislead; it fails at sustainability while PanVK holds steady.
       * Delivers a **5x–8x real-world speedup** over VirGL.
 
 <p align="center">
@@ -180,6 +183,59 @@ vkmark --winsys xcb -s 640x480
 
 **Expected Performance on Mali-G57 MC2:** full-suite **~94** (97 on re-run), zero errors — vs ~81 for the default build on the same device state. Full source: branch [`g57-vkmark-94`](https://github.com/apexspan-svg/mesa-panvk-mali-g57/tree/g57-vkmark-94) (rebuilding it reproduces the release binary byte-for-byte, md5 `d883a28e…`).
 
+### Zero-copy dma-buf WSI build (`v1.1.0-ahb`) *(Update)*
+
+A third prebuilt flavor adds an opt-in zero-copy present path (`PANVK_AHB_WSI=1`, AHB dma-buf import → DRI3 pixmap, no per-frame CPU copy) plus a teardown-safe event thread (`PANVK_X11_EVENT_POLL=1`, required on Termux:X11 which never emits Present CompleteNotify):
+
+```bash
+curl -LO https://github.com/apexspan-svg/mesa-panvk-mali-g57/releases/download/v1.1.0-ahb/panvk-mali-g57-v1.1.0-ahb.tar.gz
+tar -xzvf panvk-mali-g57-v1.1.0-ahb.tar.gz
+cd panvk-mali-g57-v1.1.0-ahb
+./install.sh
+```
+
+```bash
+export DISPLAY=:0
+export VK_ICD_FILENAMES=$PREFIX/share/vulkan/icd.d/panfrost_icd.aarch64.json
+export PANVK_NO_AFBC=1
+export PANVK_AHB_WSI=1
+export PANVK_X11_EVENT_POLL=1
+export PANVK_ASYNC=1
+vkmark --winsys xcb -s 640x480
+```
+
+**Measured on Mali-G57 MC2:** vkmark 640x480 immediate 78 → **222** (mailbox 68 → 194); 1280x720 immediate 31 → **164**; all runs exit `0`. glmark2/Zink: default path 59, async 84; AHB path needs `MESA_VK_WSI_PRESENT_MODE=mailbox` (Zink uses FIFO and AHB pixmaps get no completions, so FIFO locksteps at ~50 — mailbox sidesteps pacing entirely: glmark2 46 → **124**, async **128**, tradeoff is tearing). Binary md5 `127bc973…`. Full source: branch [`g57-ahb-wsi`](https://github.com/apexspan-svg/mesa-panvk-mali-g57/tree/g57-ahb-wsi).
+
+Also in this branch: `PANVK_FD_INTEROP=1` advertises dma-buf fd interop (`KHR_external_memory_fd`, `EXT_external_memory_dma_buf`, `EXT_image_drm_format_modifier`) backed by dma-heap/gralloc exportable allocations (export+import round-trip tested, zero mismatches). Semaphore fd import/export works via kbase soft-fence atoms (see v1.2.0).
+
+### Async + overlap + fd-semaphore build (`v1.2.0`) *(Update)*
+
+The current tip adds pipelined tiler overlap (`PANVK_OVERLAP=1`, heap-split + cross-bag deps), `PANVK_TILER_HEAP_MB`, `SPILL_NOOPT` shader retry, and real semaphore fd import/export (`SOFT_FENCE_WAIT`/`TRIGGER` atoms against the kbase sync interface — verified cross-process, 10/10):
+
+```bash
+curl -LO https://github.com/apexspan-svg/mesa-panvk-mali-g57/releases/download/v1.2.0/panvk-mali-g57-v1.2.0-ahb.tar.gz
+tar -xzvf panvk-mali-g57-v1.2.0-ahb.tar.gz
+cd panvk-mali-g57-v1.2.0-ahb
+./install.sh
+```
+
+```bash
+export DISPLAY=:0
+export VK_ICD_FILENAMES=$PREFIX/share/vulkan/icd.d/panfrost_icd.aarch64.json
+export PANVK_NO_AFBC=1 PANVK_ASYNC=1 PANVK_OVERLAP=1
+export PANVK_AHB_WSI=1 PANVK_X11_EVENT_POLL=1
+vkmark --winsys xcb -s 640x480 -p immediate
+```
+
+**Measured on Mali-G57 MC2:** vkmark **248**, glmark2/Zink (mailbox) **132**, WebGL aquarium 500 fish **51.5 fps**; PPSSPP SuicideBarbie + AC Bloodlines render correctly; all runs exit `0`. Binary md5 `202044b4…`. Full source: branch [`main`](https://github.com/apexspan-svg/mesa-panvk-mali-g57/tree/main).
+
+---
+
+## Known Issues (do not forget)
+
+* **MRT masked-attachment preserve is broken.** An attachment bound with `loadOp LOAD` + `colorWriteMask = 0` comes back zeroed instead of preserved — `colorWriteMask` is currently unhandled driver-wide (tile store writes zero-initialized data for masked channels). Repro: [Noysz `mrt_alias_test`](https://github.com/Noysz/panvk-g99-jm) (`ALIASFP mask … FAIL`, ~4000/16384 bytes clobbered; fails identically on sync/async/overlap paths, so pre-existing and unrelated to pipelining). The FristOneRR build fails the same test harder (renders nothing, `rt0=0`). Rare in real content — nothing shipped hits it — but the repro is kept built as a regression gate.
+* **Occlusion queries overcount.** A query scoped to zero covered samples reports full-triangle counts (`tri_a`: host = dev = 512, expected 0). Repro: Noysz `occlusion_query_test`; fails identically with overlap off, so pre-existing. Affects occlusion culling accuracy in real content (overdraw, not corruption).
+
 ---
 
 ## Building from Source (Developers)
@@ -280,6 +336,9 @@ This work builds directly on top of foundational research, forks, and patches fr
 * **[funnymdzz/mesa](https://github.com/funnymdzz/mesa):** Pioneered the initial `mali_kbase` kernel module backend and non-DRM device discovery on Android.
 * **[leegao/mesa-funnymdzz](https://github.com/leegao/mesa-funnymdzz):** "panvk-over-kbase for Winlator", solving device enumeration and `pan_kmod_dev_create_with_driver` initialization without `/dev/dri`.
 * **[mexicanbr0auth/mesa-panvk-g57](https://github.com/mexicanbr0auth/mesa-panvk-g57):** Experimental snapshot and base branch for Mali-G57 kbase/JM bringup.
+* **[FristOneRR/FristOneRR-Panvk-Driver](https://github.com/FristOneRR/FristOneRR-Panvk-Driver)** (source: [FristOneRR-Admin/FristOneRR-Panvk-Source](https://github.com/FristOneRR-Admin/FristOneRR-Panvk-Source)): heap-split tiler overlap design (`PANVK_OVERLAP`), CPU sync_file import/export approach, `SPILL_NOOPT` shader retry, `TILER_HEAP_MB` tuning, and kbase version-compat notes — all ported/adapted here with gratitude.
+* **[Noysz/panvk-g99-jm](https://github.com/Noysz/panvk-g99-jm):** meticulous v9/JM bring-up research on the same Helio G99 silicon — kbase uAPI surface mapping (incl. `FENCE_VALIDATE`/`STREAM_CREATE`), job-header dependency decoding, and evidence-first methodology that guided our fence-interface probes.
+* **[BossDrk](https://github.com/0x8055/panvk-g52-oppo-a38) (0x8055/panvk-g52-oppo-a38):** G52/r49 kbase-compat research (atom-stride handling) informing our version-compat notes.
 * **[wonderkast02/panvk-g720-kbase-csf](https://github.com/wonderkast02/panvk-g720-kbase-csf):** Community discussions and reverse-engineering insights on Android Mali kbase interfaces.
 
 ---
